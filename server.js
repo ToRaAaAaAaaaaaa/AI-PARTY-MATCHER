@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { candidates, policyCategories } from './candidates.js';
 
 dotenv.config();
 
@@ -10,14 +11,41 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json());
 
+// 立候補者データを取得するエンドポイント
+app.get('/api/candidates', (req, res) => {
+  res.json({ candidates, policyCategories });
+});
+
+// 統合マッチングAPI（政党 + 候補者を1回で分析）
 app.post('/api/analyze', async (req, res) => {
   const { userInput } = req.body;
+  console.log('リクエスト受信:', userInput);
 
   if (!userInput) {
     return res.status(400).json({ error: 'ユーザーの入力が必要です' });
   }
 
+  // 立候補者データをプロンプト用に整形（簡潔版）
+  const candidatesInfo = candidates.map(c => {
+    const policyScores = Object.entries(c.policy_answers)
+      .map(([category, questions]) => {
+        const scores = Object.entries(questions)
+          .map(([qKey, qData]) => `${policyCategories[category].questions[qKey]}:${qData.answer}`)
+          .join(', ');
+        return `${policyCategories[category].label}[${scores}]`;
+      })
+      .join(' / ');
+
+    return `${c.name}(${c.party},${c.district}): ${policyScores}`;
+  }).join('\n');
+
+  // タイムアウト設定（60秒）
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
   try {
+    console.log('Claude API呼び出し開始...');
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -26,79 +54,82 @@ app.post('/api/analyze', async (req, res) => {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-3-5-haiku-20241022',
         max_tokens: 2500,
         messages: [
           {
             role: 'user',
-            content: `あなたは日本の政治に詳しいアナリストです。以下のユーザーの考えや要望を分析し、最も適合する日本の政党を3つ提案してください。
+            content: `あなたは日本の政治に詳しいアナリストです。ユーザーの考えを分析し、**政党**と**立候補者**の両方についてマッチング結果を提示してください。
 
-主要政党: 自由民主党、立憲民主党、日本維新の会、公明党、日本共産党、国民民主党、れいわ新選組、社会民主党
+## 主要政党
+自由民主党、立憲民主党、日本維新の会、公明党、日本共産党、国民民主党、れいわ新選組、社会民主党
 
-ユーザーの意見:
+## 立候補者データベース（政策スタンス: 1=反対〜5=賛成）
+${candidatesInfo}
+
+## ユーザーの意見
 「${userInput}」
 
-## 分析手順：
-1. ユーザーの意見から重要なキーワードと政策課題を抽出
-2. 各政党の公式政策・マニフェスト・実績と照らし合わせ
-3. 一致度を以下の観点から評価：
-   - 政策の方向性の一致度（50点）
-   - 具体的施策の一致度（30点）
-   - 過去の実績との整合性（20点）
-4. 合計点を適合度（%）として算出
+## 分析手順
+1. ユーザーの意見からキーワードと政策課題を抽出
+2. 政党: 公式政策・マニフェストと照合し、上位3政党を選出
+3. 候補者: 上記データの政策スタンスと照合し、上位3名を選出
+4. それぞれ適合度(%)を算出
 
-## 重要：
-- 適合度は必ず上記の評価基準に基づいて算出すること
-- 理由には具体的な政策名や公約を含めること
-- 各理由の根拠となる情報源を可能な限り具体的に明記すること
-  例：「2024年衆院選マニフェスト」「公式サイトの政策ページ」「国会での発言（YYYY年MM月）」など
-- 情報源が不確かな場合は「一般的な政策方針として」などと明記すること
-- 知識カットオフ（2025年1月）以降の情報は含まれていない可能性があることを認識すること
+## 評価基準（100点満点）
+- 政策方向性の一致: 50点
+- 具体的施策の一致: 30点
+- 実績・経歴との整合: 20点
 
-以下のJSON形式のみで回答してください（他のテキストは一切含めないでください）:
+以下のJSON形式のみで回答:
 {
-  "recommendations": [
+  "analysis": "ユーザーの政策志向分析（2-3文）",
+  "party_recommendations": [
     {
       "party": "政党名",
       "match_percentage": 85,
-      "reasons": [
-        "理由1：具体的な政策名や公約を含む",
-        "理由2：具体的な政策名や公約を含む",
-        "理由3：具体的な政策名や公約を含む"
-      ],
-      "policy_matches": [
-        {
-          "policy_area": "政策分野名（例：教育、経済、外交）",
-          "user_position": "ユーザーの立場の要約",
-          "party_position": "政党の立場・公約",
-          "match_score": 85,
-          "source": "根拠となる情報源（例：2024年マニフェスト、公式サイトなど）"
-        }
-      ],
-      "score_breakdown": {
-        "policy_direction": 45,
-        "concrete_measures": 28,
-        "track_record": 18
-      }
+      "reasons": ["理由1", "理由2"],
+      "key_policies": ["一致する主要政策1", "一致する主要政策2"]
     }
   ],
-  "analysis": "ユーザーの政策志向の詳細な分析（3-4文、抽出したキーワードを含む）"
+  "candidate_recommendations": [
+    {
+      "name": "候補者名",
+      "party": "所属政党",
+      "district": "選挙区",
+      "match_percentage": 80,
+      "reasons": ["理由1", "理由2"],
+      "matching_stances": ["一致する政策スタンス1", "一致する政策スタンス2"]
+    }
+  ]
 }`
           }
         ]
-      })
+      }),
+      signal: controller.signal
     });
+
+    clearTimeout(timeout);
+    console.log('Claude APIレスポンス受信:', response.status);
 
     const data = await response.json();
 
     if (!response.ok) {
+      console.error('APIエラー:', data);
       throw new Error(data.error?.message || 'API request failed');
     }
 
+    console.log('成功！');
     res.json(data);
   } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    clearTimeout(timeout);
+    if (error.name === 'AbortError') {
+      console.error('タイムアウト（60秒）');
+      res.status(504).json({ error: 'リクエストがタイムアウトしました' });
+    } else {
+      console.error('Error:', error);
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 
